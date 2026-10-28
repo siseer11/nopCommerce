@@ -241,6 +241,9 @@ public partial record ProductModel : BaseNopEntityModel,
     [NopResourceDisplayName("Admin.Catalog.Products.Fields.IsTaxExempt")]
     public bool IsTaxExempt { get; set; }
 
+		[NopResourceDisplayName("Admin.Catalog.Products.Fields.IsBuyWithRewardEnabled")]
+    public bool IsBuyWithRewardEnabled { get; set; }
+
     [NopResourceDisplayName("Admin.Catalog.Products.Fields.TaxCategory")]
     public int TaxCategoryId { get; set; }
     public IList<SelectListItem> AvailableTaxCategories { get; set; }

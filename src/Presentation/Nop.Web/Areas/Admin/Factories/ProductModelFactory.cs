@@ -977,6 +977,7 @@ public partial class ProductModelFactory : IProductModelFactory
             model.AllowCustomerReviews = true;
             model.Published = true;
             model.VisibleIndividually = true;
+						model.IsBuyWithRewardEnabled = true;
         }
 
         model.PrimaryStoreCurrencyCode = (await _currencyService.GetCurrencyByIdAsync(_currencySettings.PrimaryStoreCurrencyId)).CurrencyCode;

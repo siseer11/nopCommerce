@@ -3492,6 +3492,12 @@
   <LocaleResource Name="Admin.Catalog.Products.Fields.IsTaxExempt.Hint">
     <Value>Determines whether this product is tax exempt (tax will not be applied to this product at checkout).</Value>
   </LocaleResource>
+	<LocaleResource Name="Admin.Catalog.Products.Fields.IsBuyWithRewardEnabled">
+    <Value>Buy with reward enabled</Value>
+  </LocaleResource>
+  <LocaleResource Name="Admin.Catalog.Products.Fields.IsBuyWithRewardEnabled.Hint">
+    <Value>Determines whether this product can be purchased with reward points.</Value>
+  </LocaleResource>
   <LocaleResource Name="Admin.Catalog.Products.Fields.Length">
     <Value>Length</Value>
   </LocaleResource>
