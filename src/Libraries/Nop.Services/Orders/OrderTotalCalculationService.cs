@@ -232,9 +232,10 @@ public partial class OrderTotalCalculationService : IOrderTotalCalculationServic
     /// <param name="discountAmountExclTax">Discount amount (excl tax)</param>
     /// <param name="shippingTotalExclTax">Shipping (excl tax)</param>
     /// <param name="taxTotal">Tax</param>
+    /// <param name="restoredCart">Shopping cart</param>
     /// <returns>A task that represents the asynchronous operation</returns>
     protected virtual async Task UpdateTotalAsync(UpdateOrderParameters updateOrderParameters, decimal subTotalExclTax,
-        decimal discountAmountExclTax, decimal shippingTotalExclTax, decimal taxTotal)
+        decimal discountAmountExclTax, decimal shippingTotalExclTax, decimal taxTotal, IList<ShoppingCartItem> restoredCart)
     {
         var updatedOrder = updateOrderParameters.UpdatedOrder;
         var customer = await _customerService.GetCustomerByIdAsync(updatedOrder.CustomerId);
@@ -265,10 +266,13 @@ public partial class OrderTotalCalculationService : IOrderTotalCalculationServic
         {
             var rewardPoints = -rewardPointsOfOrder.Points;
             var rewardPointsAmount = await ConvertRewardPointsToAmountAsync(rewardPoints);
-            if (total < rewardPointsAmount)
+
+            //points can't cover the products that are not allowed to be bought with reward points
+            var rewardEligibleTotal = await GetRewardPointsEligibleTotalAsync(restoredCart, total);
+            if (rewardEligibleTotal < rewardPointsAmount)
             {
-                rewardPoints = ConvertAmountToRewardPoints(total);
-                rewardPointsAmount = total;
+                rewardPoints = ConvertAmountToRewardPoints(rewardEligibleTotal);
+                rewardPointsAmount = rewardEligibleTotal;
             }
 
             if (total > decimal.Zero)
@@ -676,6 +680,64 @@ public partial class OrderTotalCalculationService : IOrderTotalCalculationServic
     }
 
     /// <summary>
+    /// Gets the part of the order total that can be paid with reward points.
+    /// Products with IsBuyWithRewardEnabled = false are excluded.
+    /// Everything that is not tied to a single product (shipping, payment fee, checkout attributes, order discounts, gift cards, tax)
+    /// is split between the eligible and not eligible products proportionally to their price (incl. tax)
+    /// </summary>
+    /// <param name="cart">Cart</param>
+    /// <param name="orderTotal">Order total (before reward points)</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation
+    /// The task result contains the order total amount that can be paid with reward points
+    /// </returns>
+    protected virtual async Task<decimal> GetRewardPointsEligibleTotalAsync(IList<ShoppingCartItem> cart, decimal orderTotal)
+    {
+        if (orderTotal <= decimal.Zero || cart == null || !cart.Any())
+            return orderTotal;
+
+        var items = new List<(ShoppingCartItem item, Product product)>();
+        foreach (var shoppingCartItem in cart)
+            items.Add((shoppingCartItem, await _productService.GetProductByIdAsync(shoppingCartItem.ProductId)));
+
+        //nothing is restricted, no need to calculate prices
+        if (items.All(x => x.product == null || x.product.IsBuyWithRewardEnabled))
+            return orderTotal;
+
+        var customer = await _customerService.GetShoppingCartCustomerAsync(cart);
+
+        var eligibleItemsTotal = decimal.Zero;
+        var allItemsTotal = decimal.Zero;
+        foreach (var (item, product) in items)
+        {
+						Console.WriteLine($"Processing item: {item.Id}, Product: {product?.Name}, IsBuyWithRewardEnabled: {product?.IsBuyWithRewardEnabled}");
+            var subTotal = (await _shoppingCartService.GetSubTotalAsync(item, true)).subTotal;
+            var (subTotalInclTax, _) = await _taxService.GetProductPriceAsync(product, subTotal, true, customer);
+
+            allItemsTotal += subTotalInclTax;
+            if (product == null || product.IsBuyWithRewardEnabled)
+                eligibleItemsTotal += subTotalInclTax;
+        }
+
+        decimal eligibleShare;
+        if (allItemsTotal <= decimal.Zero)
+        {
+            //free items only: points are allowed only if at least one of them is eligible
+            eligibleShare = items.Any(x => x.product == null || x.product.IsBuyWithRewardEnabled) ? decimal.One : decimal.Zero;
+        }
+        else
+        {
+            eligibleShare = Math.Clamp(eligibleItemsTotal / allItemsTotal, decimal.Zero, decimal.One);
+        }
+
+        var eligibleTotal = orderTotal * eligibleShare;
+        if (_shoppingCartSettings.RoundPricesDuringCalculation)
+            eligibleTotal = await _priceCalculationService.RoundPriceAsync(eligibleTotal);
+
+        return Math.Min(eligibleTotal, orderTotal);
+    }
+
+    /// <summary>
     /// Set reward points
     /// </summary>
     /// <param name="redeemedRewardPoints">Redeemed reward points</param>
@@ -683,9 +745,10 @@ public partial class OrderTotalCalculationService : IOrderTotalCalculationServic
     /// <param name="useRewardPoints">A value indicating whether to use reward points</param>
     /// <param name="customer">Customer</param>
     /// <param name="orderTotal">Order total</param>
+    /// <param name="cart">Cart</param>
     /// <returns>A task that represents the asynchronous operation</returns>
     protected virtual async Task<(int redeemedRewardPoints, decimal redeemedRewardPointsAmount)> SetRewardPointsAsync(int redeemedRewardPoints, decimal redeemedRewardPointsAmount,
-        bool? useRewardPoints, Customer customer, decimal orderTotal)
+        bool? useRewardPoints, Customer customer, decimal orderTotal, IList<ShoppingCartItem> cart)
     {
         if (!_rewardPointsSettings.Enabled)
             return (redeemedRewardPoints, redeemedRewardPointsAmount);
@@ -697,6 +760,12 @@ public partial class OrderTotalCalculationService : IOrderTotalCalculationServic
         if (!useRewardPoints.Value)
             return (redeemedRewardPoints, redeemedRewardPointsAmount);
 
+        if (orderTotal <= decimal.Zero)
+            return (redeemedRewardPoints, redeemedRewardPointsAmount);
+
+        //products that can't be bought with reward points are charged in full,
+        //so the points can only cover the eligible part of the total
+        orderTotal = await GetRewardPointsEligibleTotalAsync(cart, orderTotal);
         if (orderTotal <= decimal.Zero)
             return (redeemedRewardPoints, redeemedRewardPointsAmount);
 
@@ -999,7 +1068,7 @@ public partial class OrderTotalCalculationService : IOrderTotalCalculationServic
         var taxTotal = await UpdateTaxRatesAsync(subTotalTaxRates, shippingTotalInclTax, shippingTotalExclTax, shippingTaxRate, updateOrderParameters.UpdatedOrder);
 
         //total
-        await UpdateTotalAsync(updateOrderParameters, subTotalExclTax, discountAmountExclTax, shippingTotalExclTax, taxTotal);
+        await UpdateTotalAsync(updateOrderParameters, subTotalExclTax, discountAmountExclTax, shippingTotalExclTax, taxTotal, restoredCart);
     }
 
     /// <summary>
@@ -1406,7 +1475,7 @@ public partial class OrderTotalCalculationService : IOrderTotalCalculationServic
         var orderTotal = resultTemp;
 
         //reward points
-        (redeemedRewardPoints, redeemedRewardPointsAmount) = await SetRewardPointsAsync(redeemedRewardPoints, redeemedRewardPointsAmount, useRewardPoints, customer, orderTotal);
+        (redeemedRewardPoints, redeemedRewardPointsAmount) = await SetRewardPointsAsync(redeemedRewardPoints, redeemedRewardPointsAmount, useRewardPoints, customer, orderTotal, cart);
 
         orderTotal -= redeemedRewardPointsAmount;
 

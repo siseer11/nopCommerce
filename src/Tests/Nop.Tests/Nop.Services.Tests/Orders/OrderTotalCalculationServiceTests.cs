@@ -730,4 +730,56 @@ public class OrderTotalCalculationServiceTests : ServiceTest
         GetService<IOrderTotalCalculationService>().CheckMinimumRewardPointsToUseRequirement(2).Should().BeTrue();
         GetService<IOrderTotalCalculationService>().CheckMinimumRewardPointsToUseRequirement(10).Should().BeTrue();
     }
+
+    [Test]
+    public async Task RewardPointsCanNotPayForProductsWithBuyWithRewardDisabled()
+    {
+        var rewardPointService = GetService<IRewardPointService>();
+        const int points = 100000;
+
+        var eligibleItem = await CreateTestShopCartItemAsync(100M);
+        var restrictedItem = await CreateTestShopCartItemAsync(100M);
+        foreach (var (item, enabled) in new[] { (eligibleItem, true), (restrictedItem, false) })
+        {
+            var product = await _productService.GetProductByIdAsync(item.ProductId);
+            product.IsBuyWithRewardEnabled = enabled;
+            await _productService.UpdateProductAsync(product);
+        }
+
+        _rewardPointsSettings.Enabled = true;
+        _rewardPointsSettings.ExchangeRate = 1M;
+        _rewardPointsSettings.MinimumRewardPointsToUse = 0;
+        _rewardPointsSettings.MaximumRewardPointsToUsePerOrder = 0;
+        _rewardPointsSettings.MaximumRedeemedRate = 0M;
+        await _settingService.SaveSettingAsync(_rewardPointsSettings);
+
+        await rewardPointService.AddRewardPointsHistoryEntryAsync(_customer, points, _store.Id, "test", activatingDate: DateTime.UtcNow.AddMinutes(-10));
+
+        try
+        {
+            //only the eligible half of the cart (including its share of tax) can be paid with points
+            var cart = new List<ShoppingCartItem> { eligibleItem, restrictedItem };
+            var (totalWithoutPoints, _, _, _, _, _) = await _orderTotalCalcService.GetShoppingCartTotalAsync(cart, false);
+            var (totalWithPoints, _, _, _, redeemedPoints, redeemedAmount) = await _orderTotalCalcService.GetShoppingCartTotalAsync(cart, true);
+
+            redeemedAmount.Should().BeApproximately(totalWithoutPoints.Value / 2, 0.01M);
+            redeemedPoints.Should().Be((int)Math.Ceiling(redeemedAmount));
+            totalWithPoints.Should().BeApproximately(totalWithoutPoints.Value - redeemedAmount, 0.01M);
+
+            //only restricted products: nothing can be paid with points
+            (totalWithPoints, _, _, _, redeemedPoints, redeemedAmount) = await _orderTotalCalcService.GetShoppingCartTotalAsync(new List<ShoppingCartItem> { restrictedItem }, true);
+            redeemedPoints.Should().Be(0);
+            redeemedAmount.Should().Be(0);
+
+            //only eligible products: points can pay for the whole total
+            (totalWithPoints, _, _, _, _, _) = await _orderTotalCalcService.GetShoppingCartTotalAsync(new List<ShoppingCartItem> { eligibleItem }, true);
+            totalWithPoints.Should().Be(0);
+        }
+        finally
+        {
+            await rewardPointService.AddRewardPointsHistoryEntryAsync(_customer, -points, _store.Id, "test cleanup", activatingDate: DateTime.UtcNow.AddMinutes(-5));
+            _rewardPointsSettings.Enabled = false;
+            await _settingService.SaveSettingAsync(_rewardPointsSettings);
+        }
+    }
 }

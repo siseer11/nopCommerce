@@ -20,7 +20,7 @@ public class BuyWithRewardMigration : ForwardOnlyMigration
                 .AddColumn(columnName)
                 .AsBoolean()
                 .NotNullable()
-                .SetExistingRowsTo(false);
+                .SetExistingRowsTo(true);
         }
     }
 }
