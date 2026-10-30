@@ -730,4 +730,195 @@ public class OrderTotalCalculationServiceTests : ServiceTest
         GetService<IOrderTotalCalculationService>().CheckMinimumRewardPointsToUseRequirement(2).Should().BeTrue();
         GetService<IOrderTotalCalculationService>().CheckMinimumRewardPointsToUseRequirement(10).Should().BeTrue();
     }
+
+    #region Buy with reward points
+
+    private sealed class RewardPointsScope(Func<Task> restore) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync() => await restore();
+    }
+
+    private async Task<RewardPointsScope> EnableRewardPointsAsync(int balance = 100000, int maximumPointsPerOrder = 0)
+    {
+        var rewardPointService = GetService<IRewardPointService>();
+
+        var oldEnabled = _rewardPointsSettings.Enabled;
+        var oldExchangeRate = _rewardPointsSettings.ExchangeRate;
+        var oldMinimum = _rewardPointsSettings.MinimumRewardPointsToUse;
+        var oldMaximumPoints = _rewardPointsSettings.MaximumRewardPointsToUsePerOrder;
+        var oldMaximumRate = _rewardPointsSettings.MaximumRedeemedRate;
+        var oldRounding = _shoppingCartSettings.RoundPricesDuringCalculation;
+
+        _rewardPointsSettings.Enabled = true;
+        _rewardPointsSettings.ExchangeRate = 1M;
+        _rewardPointsSettings.MinimumRewardPointsToUse = 0;
+        _rewardPointsSettings.MaximumRewardPointsToUsePerOrder = maximumPointsPerOrder;
+        _rewardPointsSettings.MaximumRedeemedRate = 0M;
+        _shoppingCartSettings.RoundPricesDuringCalculation = true;
+        await _settingService.SaveSettingAsync(_rewardPointsSettings);
+        await _settingService.SaveSettingAsync(_shoppingCartSettings);
+
+        _orderTotalCalcService = GetService<IOrderTotalCalculationService>();
+
+        var entryId = await rewardPointService.AddRewardPointsHistoryEntryAsync(_customer, balance, _store.Id, "Test points", activatingDate: DateTime.UtcNow.AddMinutes(-1));
+
+        return new RewardPointsScope(async () =>
+        {
+            var entry = await rewardPointService.GetRewardPointsHistoryEntryByIdAsync(entryId);
+            if (entry != null)
+                await rewardPointService.DeleteRewardPointsHistoryEntryAsync(entry);
+
+            _rewardPointsSettings.Enabled = oldEnabled;
+            _rewardPointsSettings.ExchangeRate = oldExchangeRate;
+            _rewardPointsSettings.MinimumRewardPointsToUse = oldMinimum;
+            _rewardPointsSettings.MaximumRewardPointsToUsePerOrder = oldMaximumPoints;
+            _rewardPointsSettings.MaximumRedeemedRate = oldMaximumRate;
+            _shoppingCartSettings.RoundPricesDuringCalculation = oldRounding;
+            await _settingService.SaveSettingAsync(_rewardPointsSettings);
+            await _settingService.SaveSettingAsync(_shoppingCartSettings);
+        });
+    }
+
+    private async Task<ShoppingCartItem> CreateRewardCartItemAsync(decimal price, bool isBuyWithRewardEnabled)
+    {
+        var item = await CreateTestShopCartItemAsync(price);
+        var product = await _productService.GetProductByIdAsync(item.ProductId);
+        product.IsBuyWithRewardEnabled = isBuyWithRewardEnabled;
+        await _productService.UpdateProductAsync(product);
+
+        return item;
+    }
+
+    private async Task<decimal> GetSubTotalInclTaxAsync(ShoppingCartItem item)
+    {
+        var (_, _, _, subTotalWithDiscount, _) = await _orderTotalCalcService.GetShoppingCartSubTotalAsync([item], true);
+        return subTotalWithDiscount;
+    }
+
+    [Test]
+    public async Task RewardPointsCanPayForWholeCartWhenAllProductsAreBuyWithRewardEnabled()
+    {
+        await using var _ = await EnableRewardPointsAsync();
+
+        var cart = new List<ShoppingCartItem>
+        {
+            await CreateRewardCartItemAsync(100M, true),
+            await CreateRewardCartItemAsync(50M, true)
+        };
+
+        var (totalWithoutPoints, _, _, _, _, _) = await _orderTotalCalcService.GetShoppingCartTotalAsync(cart, false);
+        var (total, _, _, _, redeemedPoints, redeemedAmount) = await _orderTotalCalcService.GetShoppingCartTotalAsync(cart, true);
+
+        totalWithoutPoints.Should().BeGreaterThan(0);
+        redeemedAmount.Should().Be(totalWithoutPoints.Value);
+        redeemedPoints.Should().BeGreaterThan(0);
+        total.Should().Be(0M);
+    }
+
+    [Test]
+    public async Task RewardPointsCannotBeUsedWhenNoProductIsBuyWithRewardEnabled()
+    {
+        await using var _ = await EnableRewardPointsAsync();
+
+        var cart = new List<ShoppingCartItem>
+        {
+            await CreateRewardCartItemAsync(100M, false),
+            await CreateRewardCartItemAsync(50M, false)
+        };
+
+        var (totalWithoutPoints, _, _, _, _, _) = await _orderTotalCalcService.GetShoppingCartTotalAsync(cart, false);
+        var (total, _, _, _, redeemedPoints, redeemedAmount) = await _orderTotalCalcService.GetShoppingCartTotalAsync(cart, true);
+
+        redeemedPoints.Should().Be(0);
+        redeemedAmount.Should().Be(0M);
+        total.Should().Be(totalWithoutPoints);
+    }
+
+    [Test]
+    public async Task RewardPointsCannotPayForProductsThatAreNotBuyWithRewardEnabled()
+    {
+        await using var _ = await EnableRewardPointsAsync();
+
+        var eligible = await CreateRewardCartItemAsync(100M, true);
+        var notEligible = await CreateRewardCartItemAsync(50M, false);
+        var cart = new List<ShoppingCartItem> { eligible, notEligible };
+
+        var notEligibleSubTotal = await GetSubTotalInclTaxAsync(notEligible);
+
+        var (totalWithoutPoints, _, _, _, _, _) = await _orderTotalCalcService.GetShoppingCartTotalAsync(cart, false);
+        var (total, _, _, _, _, redeemedAmount) = await _orderTotalCalcService.GetShoppingCartTotalAsync(cart, true);
+
+        notEligibleSubTotal.Should().BeGreaterThan(0);
+        redeemedAmount.Should().Be(totalWithoutPoints.Value - notEligibleSubTotal);
+        total.Should().Be(notEligibleSubTotal);
+    }
+
+    [Test]
+    public async Task RewardPointsRedemptionIsNotAffectedByTheOrderOfCartItems()
+    {
+        await using var _ = await EnableRewardPointsAsync();
+
+        var eligible = await CreateRewardCartItemAsync(100M, true);
+        var notEligible = await CreateRewardCartItemAsync(50M, false);
+
+        var (_, _, _, _, _, amount1) = await _orderTotalCalcService.GetShoppingCartTotalAsync([eligible, notEligible], true);
+        var (_, _, _, _, _, amount2) = await _orderTotalCalcService.GetShoppingCartTotalAsync([notEligible, eligible], true);
+
+        var balance = await GetService<IRewardPointService>().GetRewardPointsBalanceAsync(_customer.Id, _store.Id);
+        var diag = $"balance={balance}, enabled={_rewardPointsSettings.Enabled}, rate={_rewardPointsSettings.ExchangeRate}, min={_rewardPointsSettings.MinimumRewardPointsToUse}, max={_rewardPointsSettings.MaximumRewardPointsToUsePerOrder}, maxRate={_rewardPointsSettings.MaximumRedeemedRate}";
+        Assert.That(amount1, Is.GreaterThan(0), diag);
+    }
+
+    [Test]
+    public async Task RewardPointsRedemptionIsStillLimitedByMaximumPointsPerOrder()
+    {
+        await using var _ = await EnableRewardPointsAsync(maximumPointsPerOrder: 5);
+
+        var cart = new List<ShoppingCartItem>
+        {
+            await CreateRewardCartItemAsync(100M, true),
+            await CreateRewardCartItemAsync(50M, false)
+        };
+
+        var (_, _, _, _, redeemedPoints, redeemedAmount) = await _orderTotalCalcService.GetShoppingCartTotalAsync(cart, true);
+
+        var maximumAmount = await _orderTotalCalcService.ConvertRewardPointsToAmountAsync(5);
+
+        redeemedPoints.Should().BeLessThanOrEqualTo(5);
+        redeemedPoints.Should().BeGreaterThan(0);
+        redeemedAmount.Should().BeLessThanOrEqualTo(maximumAmount);
+    }
+
+    [Test]
+    public async Task RewardPointsAreNotRedeemedWhenCustomerDoesNotWantToUseThem()
+    {
+        await using var _ = await EnableRewardPointsAsync();
+
+        var cart = new List<ShoppingCartItem> { await CreateRewardCartItemAsync(100M, true) };
+
+        var (total, _, _, _, redeemedPoints, redeemedAmount) = await _orderTotalCalcService.GetShoppingCartTotalAsync(cart, false);
+
+        redeemedPoints.Should().Be(0);
+        redeemedAmount.Should().Be(0M);
+        total.Should().BeGreaterThan(0);
+    }
+
+    [Test]
+    public async Task RewardPointsAreNotRedeemedWhenRewardPointsSystemIsDisabled()
+    {
+        await using var scope = await EnableRewardPointsAsync();
+
+        _rewardPointsSettings.Enabled = false;
+        await _settingService.SaveSettingAsync(_rewardPointsSettings);
+        _orderTotalCalcService = GetService<IOrderTotalCalculationService>();
+
+        var cart = new List<ShoppingCartItem> { await CreateRewardCartItemAsync(100M, true) };
+
+        var (_, _, _, _, redeemedPoints, redeemedAmount) = await _orderTotalCalcService.GetShoppingCartTotalAsync(cart, true);
+
+        redeemedPoints.Should().Be(0);
+        redeemedAmount.Should().Be(0M);
+    }
+
+    #endregion
 }
