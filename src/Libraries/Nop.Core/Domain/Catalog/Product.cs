@@ -274,6 +274,11 @@ public partial class Product : BaseEntity, ILocalizedEntity, ISlugSupported, IAc
     /// </summary>
     public bool IsTaxExempt { get; set; }
 
+		/// <summary>
+    /// Gets or sets a value indicating whether the product is marked as buy with reward enabled
+    /// </summary>
+    public bool IsBuyWithRewardEnabled { get; set; }
+
     /// <summary>
     /// Gets or sets the tax category identifier
     /// </summary>

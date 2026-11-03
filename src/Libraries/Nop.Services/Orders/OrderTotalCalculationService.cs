@@ -676,6 +676,35 @@ public partial class OrderTotalCalculationService : IOrderTotalCalculationServic
     }
 
     /// <summary>
+    /// Gets the amount (incl. tax) of the products in the cart which cannot be paid with reward points.
+    /// Everything else (other products, shipping, payment fee, checkout attributes) remains redeemable
+    /// </summary>
+    /// <param name="cart">Shopping cart</param>
+    /// <param name="customer">Customer</param>
+    /// <returns>A task that represents the asynchronous operation. The task result contains the non-redeemable amount</returns>
+    protected virtual async Task<decimal> GetRewardPointsNonRedeemableAmountAsync(IList<ShoppingCartItem> cart, Customer customer)
+    {
+        var nonRedeemableAmount = decimal.Zero;
+
+        foreach (var item in cart)
+        {
+            var product = await _productService.GetProductByIdAsync(item.ProductId);
+            if (product == null || product.IsBuyWithRewardEnabled)
+                continue;
+
+            var subTotal = (await _shoppingCartService.GetSubTotalAsync(item, true)).subTotal;
+            var (subTotalInclTax, _) = await _taxService.GetProductPriceAsync(product, subTotal, true, customer);
+
+            if (_shoppingCartSettings.RoundPricesDuringCalculation)
+                subTotalInclTax = await _priceCalculationService.RoundPriceAsync(subTotalInclTax);
+
+            nonRedeemableAmount += subTotalInclTax;
+        }
+
+        return nonRedeemableAmount;
+    }
+
+    /// <summary>
     /// Set reward points
     /// </summary>
     /// <param name="redeemedRewardPoints">Redeemed reward points</param>
@@ -1405,8 +1434,10 @@ public partial class OrderTotalCalculationService : IOrderTotalCalculationServic
 
         var orderTotal = resultTemp;
 
-        //reward points
-        (redeemedRewardPoints, redeemedRewardPointsAmount) = await SetRewardPointsAsync(redeemedRewardPoints, redeemedRewardPointsAmount, useRewardPoints, customer, orderTotal);
+        //reward points (only the part of the order made of products that can be bought with reward points)
+        var redeemableOrderTotal = Math.Max(orderTotal - await GetRewardPointsNonRedeemableAmountAsync(cart, customer), decimal.Zero);
+
+        (redeemedRewardPoints, redeemedRewardPointsAmount) = await SetRewardPointsAsync(redeemedRewardPoints, redeemedRewardPointsAmount, useRewardPoints, customer, redeemableOrderTotal);
 
         orderTotal -= redeemedRewardPointsAmount;
 
