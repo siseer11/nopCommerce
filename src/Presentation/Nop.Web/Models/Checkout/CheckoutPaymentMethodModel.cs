@@ -17,6 +17,7 @@ public partial record CheckoutPaymentMethodModel : BaseNopModel
     public string RewardPointsToUseAmount { get; set; }
     public bool RewardPointsEnoughToPayForOrder { get; set; }
     public bool UseRewardPoints { get; set; }
+    public bool CartContainsItemsNotRedeemable { get; set; }
 
     #region Nested classes
 

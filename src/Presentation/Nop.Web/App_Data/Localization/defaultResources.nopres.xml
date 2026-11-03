@@ -17743,9 +17743,6 @@
   <LocaleResource Name="Checkout.SomeProductsNotElegibleForRewardPointsRedemption">
     <Value>Some product(s) in your cart are not elegible for reward point redemption</Value>
   </LocaleResource>
-  <LocaleResource Name="Checkout.NoProductsElegibleForRewardPointsRedemption">
-    <Value>You can not use your reward points on these products</Value>
-  </LocaleResource>
   <LocaleResource Name="Checkout.VatNumber">
     <Value>VAT number</Value>
   </LocaleResource>

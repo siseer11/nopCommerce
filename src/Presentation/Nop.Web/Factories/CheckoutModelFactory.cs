@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Mvc.Rendering;
 using Nop.Core;
+using Nop.Core.Domain.Catalog;
 using Nop.Core.Domain.Common;
 using Nop.Core.Domain.Customers;
 using Nop.Core.Domain.Orders;
@@ -59,6 +60,7 @@ public partial class CheckoutModelFactory : ICheckoutModelFactory
     protected readonly RewardPointsSettings _rewardPointsSettings;
     protected readonly ShippingSettings _shippingSettings;
     protected readonly TaxSettings _taxSettings;
+    protected readonly IProductService _productService;
 
     #endregion
 
@@ -94,7 +96,8 @@ public partial class CheckoutModelFactory : ICheckoutModelFactory
         PaymentSettings paymentSettings,
         RewardPointsSettings rewardPointsSettings,
         ShippingSettings shippingSettings,
-        TaxSettings taxSettings)
+        TaxSettings taxSettings,
+        IProductService productService)
     {
         _addressSettings = addressSettings;
         _captchaSettings = captchaSettings;
@@ -127,6 +130,7 @@ public partial class CheckoutModelFactory : ICheckoutModelFactory
         _rewardPointsSettings = rewardPointsSettings;
         _shippingSettings = shippingSettings;
         _taxSettings = taxSettings;
+        _productService = productService;
     }
 
     #endregion
@@ -267,10 +271,10 @@ public partial class CheckoutModelFactory : ICheckoutModelFactory
         //existing addresses
         var addresses = await (await _customerService.GetAddressesByCustomerIdAsync(customer.Id))
             .WhereAwait(async a => !a.CountryId.HasValue || await _countryService.GetCountryByAddressAsync(a) is
-                {
-                    Published: true,
-                    AllowsBilling: true
-                } country
+            {
+                Published: true,
+                AllowsBilling: true
+            } country
                 &&
                 //enabled for the current store
                 await _storeMappingService.AuthorizeAsync(country))
@@ -322,10 +326,10 @@ public partial class CheckoutModelFactory : ICheckoutModelFactory
         var customer = await _workContext.GetCurrentCustomerAsync();
         var addresses = await (await _customerService.GetAddressesByCustomerIdAsync(customer.Id))
             .WhereAwait(async a => !a.CountryId.HasValue || await _countryService.GetCountryByAddressAsync(a) is
-                {
-                    Published: true,
-                    AllowsShipping: true
-                } country
+            {
+                Published: true,
+                AllowsShipping: true
+            } country
                 &&
                 //enabled for the current store
                 await _storeMappingService.AuthorizeAsync(country))
@@ -511,6 +515,15 @@ public partial class CheckoutModelFactory : ICheckoutModelFactory
         //reward points
         if (_rewardPointsSettings.Enabled && !await _shoppingCartService.ShoppingCartIsRecurringAsync(cart))
         {
+            foreach (var item in cart)
+            {
+                var product = await _productService.GetProductByIdAsync(item.ProductId);
+                if (product is null || product.IsBuyWithRewardEnabled)
+                    continue;
+
+                model.CartContainsItemsNotRedeemable = true;
+                break;
+            }
             var shoppingCartTotal = await _orderTotalCalculationService.GetShoppingCartTotalAsync(cart, true, false);
             if (shoppingCartTotal.redeemedRewardPoints > 0)
             {
